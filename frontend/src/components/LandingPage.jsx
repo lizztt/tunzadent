@@ -520,6 +520,7 @@ export default function LandingPage() {
               </div>
             </div>
 
+            {/*
             <div>
               <h4 className="text-sm font-semibold uppercase tracking-wide mb-4">Legal</h4>
               <div className="space-y-2">
@@ -534,6 +535,7 @@ export default function LandingPage() {
                 </button>
               </div>
             </div>
+            */}
           </div>
 
           <div className="text-center">

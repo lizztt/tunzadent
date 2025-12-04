@@ -382,10 +382,8 @@ class CariesDetector:
         """Initialize model and transforms"""
         self._device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         
-        # Updated to look for v2 model first, fallback to v1
         model_paths = [
-            Path(settings.BASE_DIR) / 'ml_models' / 'best_caries_classifier_v2.pth',
-            Path(settings.BASE_DIR) / 'ml_models' / 'best_caries_classifier.pth',
+            Path(settings.BASE_DIR) / 'ml_models' / 'best_caries_classifier_v2.pth'
         ]
         
         model_path = None
