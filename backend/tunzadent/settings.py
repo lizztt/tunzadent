@@ -91,8 +91,12 @@ WSGI_APPLICATION = 'tunzadent.wsgi.application'
 
 DATABASES = {
     'default': {
-        'ENGINE': 'django.db.backends.sqlite3',
-        'NAME': BASE_DIR / 'db.sqlite3',
+        'ENGINE': 'django.db.backends.mysql',
+        'NAME': config('DB_NAME'),
+        'USER': config('DB_USER'),
+        'PASSWORD': config('DB_PASSWORD'),
+        'HOST': config('DB_HOST'),
+        'PORT': config('DB_PORT', default='3306'),
     }
 }
 
@@ -169,6 +173,11 @@ CORS_ALLOWED_ORIGINS = [
 # Allow credentials for JWT cookies if needed
 CORS_ALLOW_CREDENTIALS = True
 
+CSRF_TRUSTED_ORIGINS = [
+    "https://tunzadent.vercel.app",
+    "https://*.railway.app",
+]
+
 # Media files (for X-ray uploads)
 MEDIA_URL = '/media/'
 MEDIA_ROOT = os.path.join(BASE_DIR, 'media')
@@ -192,7 +201,7 @@ FRONTEND_URL = config('FRONTEND_URL', default='http://localhost:3000')
 
 # Security settings for production
 if not DEBUG:
-    SECURE_SSL_REDIRECT = False  # Railway handles SSL
+    SECURE_SSL_REDIRECT = config('SECURE_SSL_REDIRECT', default=False, cast=bool)
     SESSION_COOKIE_SECURE = True
     CSRF_COOKIE_SECURE = True
     SECURE_BROWSER_XSS_FILTER = True
