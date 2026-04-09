@@ -12,6 +12,43 @@ from pathlib import Path
 from django.conf import settings
 
 # ============================================
+# Model Download Helper
+# ============================================
+
+def download_model_if_needed(model_path: Path) -> bool:
+    """
+    Download model from Hugging Face Hub if not present locally.
+    Returns True if model is available (either pre-existing or downloaded).
+    """
+    if model_path.exists() and model_path.stat().st_size > 1_000_000:
+        # File exists and is larger than 1MB (not a git-lfs pointer)
+        return True
+
+    hf_repo = getattr(settings, 'HF_MODEL_REPO', '')
+    hf_token = getattr(settings, 'HF_TOKEN', '') or None
+
+    if not hf_repo:
+        print("WARNING: HF_MODEL_REPO not set. Cannot download model.")
+        return False
+
+    print(f"Downloading model from Hugging Face: {hf_repo} ...")
+    try:
+        from huggingface_hub import hf_hub_download
+        model_path.parent.mkdir(parents=True, exist_ok=True)
+        downloaded = hf_hub_download(
+            repo_id=hf_repo,
+            filename='best_caries_classifier_v2.pth',
+            local_dir=str(model_path.parent),
+            token=hf_token,
+        )
+        print(f"Model downloaded to: {downloaded}")
+        return True
+    except Exception as e:
+        print(f"ERROR downloading model: {e}")
+        return False
+
+
+# ============================================
 # Model Architecture with Attention Support
 # ============================================
 
@@ -22,9 +59,9 @@ class PatchEmbed(nn.Module):
         self.img_size = img_size
         self.patch_size = patch_size
         self.n_patches = (img_size // patch_size) ** 2
-        self.proj = nn.Conv2d(in_chans, embed_dim, 
-                             kernel_size=patch_size, stride=patch_size)
-    
+        self.proj = nn.Conv2d(in_chans, embed_dim,
+                              kernel_size=patch_size, stride=patch_size)
+
     def forward(self, x):
         x = self.proj(x)
         x = x.flatten(2)
@@ -34,13 +71,12 @@ class PatchEmbed(nn.Module):
 
 class CariesClassifier(nn.Module):
     """Caries classification model with attention extraction - 90.67% accuracy!"""
-    
+
     def __init__(self, checkpoint_path, num_classes=2):
         super().__init__()
-        
+
         checkpoint = torch.load(checkpoint_path, map_location='cpu')
-        
-        # Default config matching  training setup
+
         default_config = {
             'img_size': 224,
             'patch_size': 16,
@@ -49,14 +85,13 @@ class CariesClassifier(nn.Module):
             'num_heads': 12,
             'mlp_ratio': 4.0,
         }
-        
-        # Use checkpoint config if available
+
         if 'config' in checkpoint:
             config = {**default_config, **checkpoint['config']}
         else:
             config = default_config
             print("No config found in checkpoint, using defaults")
-        
+
         self.patch_embed = PatchEmbed(
             config['img_size'], config['patch_size'], 3, config['embed_dim']
         )
@@ -64,15 +99,15 @@ class CariesClassifier(nn.Module):
         self.pos_embed = nn.Parameter(
             torch.zeros(1, 1 + self.patch_embed.n_patches, config['embed_dim'])
         )
-        
+
         self.encoder = nn.ModuleList([
             timm.models.vision_transformer.Block(
-                config['embed_dim'], config['num_heads'], 
+                config['embed_dim'], config['num_heads'],
                 config['mlp_ratio'], qkv_bias=True, norm_layer=nn.LayerNorm
             ) for _ in range(config['depth'])
         ])
         self.encoder_norm = nn.LayerNorm(config['embed_dim'])
-        
+
         self.head = nn.Sequential(
             nn.Linear(config['embed_dim'], 512),
             nn.ReLU(),
@@ -82,90 +117,58 @@ class CariesClassifier(nn.Module):
             nn.Dropout(0.3),
             nn.Linear(256, num_classes)
         )
-        
-        # Storage for attention maps
+
         self.attention_maps = []
-        
-        # Load weights
+
         try:
             self.load_state_dict(checkpoint['model_state_dict'], strict=False)
             print("Model weights loaded successfully")
         except Exception as e:
             print(f"Warning loading weights: {e}")
-        
+
         self.eval()
-    
+
     def _forward_with_attention(self, block, x):
-        """Forward through a block while capturing attention weights"""
         shortcut = x
         x = block.norm1(x)
-        
-        # Manually compute attention
         B, N, C = x.shape
         qkv = block.attn.qkv(x).reshape(B, N, 3, block.attn.num_heads, C // block.attn.num_heads).permute(2, 0, 3, 1, 4)
         q, k, v = qkv.unbind(0)
-        
-        # Compute attention weights
         attn = (q @ k.transpose(-2, -1)) * block.attn.scale
         attn = attn.softmax(dim=-1)
-        attn_weights = attn.detach()  # Save for return
-        
-        # Apply dropout and compute output
+        attn_weights = attn.detach()
         attn = block.attn.attn_drop(attn)
         x = (attn @ v).transpose(1, 2).reshape(B, N, C)
         x = block.attn.proj(x)
         x = block.attn.proj_drop(x)
-        
-        # Residual connection
         x = shortcut + block.drop_path1(block.ls1(x))
-        
-        # FFN
         x = x + block.drop_path2(block.ls2(block.mlp(block.norm2(x))))
-        
         return x, attn_weights
-    
+
     def forward(self, x, return_attention=False):
-        """
-        Forward pass with optional attention extraction
-        
-        Args:
-            x: Input tensor [B, 3, H, W]
-            return_attention: If True, returns (logits, attention_weights)
-        
-        Returns:
-            logits: [B, num_classes]
-            attention (optional): [B, heads, patches, patches]
-        """
         if return_attention:
             self.attention_maps = []
-        
-        # Patch embedding
+
         x = self.patch_embed(x)
         x = x + self.pos_embed[:, 1:, :]
-        
-        # Add CLS token
         cls_tokens = self.cls_token.expand(x.shape[0], -1, -1)
         x = torch.cat((cls_tokens, x), dim=1)
-        
-        # Encoder with optional attention capture
+
         for block_idx, blk in enumerate(self.encoder):
             if return_attention and block_idx == len(self.encoder) - 1:
-                # Capture attention from last block
                 x, attn = self._forward_with_attention(blk, x)
                 self.attention_maps.append(attn)
             else:
                 x = blk(x)
-        
+
         x = self.encoder_norm(x)
-        
-        # Classification
         cls_output = x[:, 0]
         logits = self.head(cls_output)
-        
+
         if return_attention:
             attention = self.attention_maps[-1] if self.attention_maps else None
             return logits, attention
-        
+
         return logits
 
 
@@ -174,69 +177,34 @@ class CariesClassifier(nn.Module):
 # ============================================
 
 def generate_attention_heatmap(model, image_tensor, device):
-    """
-    Generate attention heatmap as base64 encoded image
-    
-    Args:
-        model: CariesClassifier instance
-        image_tensor: Preprocessed image tensor [1, 3, 224, 224]
-        device: torch device
-    
-    Returns:
-        str: Base64 encoded PNG image of attention heatmap
-    """
     model.eval()
-    
     with torch.no_grad():
         logits, attention = model(image_tensor, return_attention=True)
-    
+
     if attention is None:
         return None
-    
-    # Process attention: [batch, heads, patches, patches]
-    attention = attention[0]  # Remove batch dimension
-    attention = attention.mean(dim=0)  # Average across attention heads
-    
-    # Get CLS token attention to all other patches
-    cls_attention = attention[0, 1:]  # Skip CLS token itself
-    
-    # Reshape to 2D grid (14x14 for 224x224 image with 16x16 patches)
+
+    attention = attention[0]
+    attention = attention.mean(dim=0)
+    cls_attention = attention[0, 1:]
     grid_size = int(np.sqrt(cls_attention.shape[0]))
     attention_map = cls_attention.reshape(grid_size, grid_size).cpu().numpy()
-    
-    # Normalize to [0, 1]
     attention_map = (attention_map - attention_map.min()) / (attention_map.max() - attention_map.min() + 1e-8)
-    
-    # Resize to 224x224
     attention_pil = Image.fromarray((attention_map * 255).astype(np.uint8))
     attention_pil = attention_pil.resize((224, 224), Image.BILINEAR)
     attention_array = np.array(attention_pil) / 255.0
-    
-    # Apply jet colormap
     colored_heatmap = cm.jet(attention_array)[:, :, :3]
-    
-    # Convert to PIL and encode as base64
     heatmap_pil = Image.fromarray((colored_heatmap * 255).astype(np.uint8))
     buffer = io.BytesIO()
     heatmap_pil.save(buffer, format='PNG')
     heatmap_base64 = base64.b64encode(buffer.getvalue()).decode()
-    
     return heatmap_base64
 
 
 def generate_recommendations(prediction_data):
-    """
-    Generate clinical recommendations based on prediction results
-    
-    Args:
-        prediction_data: Dict with 'has_caries' and 'confidence_score'
-    
-    Returns:
-        dict: Structured recommendations for clinician and patient
-    """
     has_caries = prediction_data['has_caries']
     confidence = prediction_data['confidence_score']
-    
+
     recommendations = {
         'severity': None,
         'clinical_actions': [],
@@ -248,7 +216,7 @@ def generate_recommendations(prediction_data):
             'Always perform thorough clinical examination and consider patient history before treatment decisions.'
         )
     }
-    
+
     if has_caries:
         if confidence >= 0.90:
             recommendations.update({
@@ -348,63 +316,63 @@ def generate_recommendations(prediction_data):
                 ],
                 'follow_up': 'Clinical follow-up in 3-4 months with repeat radiograph if indicated.'
             })
-    
+
     return recommendations
 
 
 # ============================================
-# Main Detector Class
+# Main Detector Class (Singleton)
 # ============================================
 
 class CariesDetector:
     """
-    Singleton class for caries detection with attention visualization
-    
+    Singleton class for caries detection with attention visualization.
+
     Model Performance:
     - Accuracy: 90.67%
     - Sensitivity: 92.50%
     - Specificity: 88.57%
     - AUC-ROC: 96.57%
     """
-    
+
     _instance = None
     _model = None
     _device = None
     _transform = None
-    
+    _available = False  # Whether model loaded successfully
+
     def __new__(cls):
         if cls._instance is None:
             cls._instance = super().__new__(cls)
             cls._instance._initialize()
         return cls._instance
-    
+
     def _initialize(self):
-        """Initialize model and transforms"""
+        """Initialize model and transforms, downloading from HF if needed."""
         self._device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        
-        model_paths = [
-            Path(settings.BASE_DIR) / 'ml_models' / 'best_caries_classifier_v2.pth'
-        ]
-        
-        model_path = None
-        for path in model_paths:
-            if path.exists():
-                model_path = path
-                break
-        
-        if model_path is None:
-            raise FileNotFoundError(
-                f"Model not found. Please place model file in: "
-                f"{Path(settings.BASE_DIR) / 'ml_models'}"
-            )
-        
+
+        model_path = Path(settings.BASE_DIR) / 'ml_models' / 'best_caries_classifier_v2.pth'
+
+        # Try to download if not present or is a git-lfs pointer stub
+        available = download_model_if_needed(model_path)
+
+        if not available:
+            print("ERROR: Model unavailable. Predictions will return error responses.")
+            self._available = False
+            return
+
         print(f"Loading caries detection model from {model_path.name} on {self._device}")
-        self._model = CariesClassifier(str(model_path))
-        self._model.to(self._device)
-        self._model.eval()
-        print("Model loaded successfully! Ready for predictions with attention visualization.")
-        
-        # Same transforms used during training
+        try:
+            self._model = CariesClassifier(str(model_path))
+            self._model.to(self._device)
+            self._model.eval()
+            self._available = True
+            print("Model loaded successfully! Ready for predictions with attention visualization.")
+        except Exception as e:
+            print(f"ERROR loading model: {e}")
+            self._available = False
+            return
+
         self._transform = transforms.Compose([
             transforms.Resize((224, 224)),
             transforms.ToTensor(),
@@ -413,51 +381,37 @@ class CariesDetector:
                 std=[0.229, 0.224, 0.225]
             )
         ])
-    
+
     def predict(self, image_path, return_attention=False, return_recommendations=True):
         """
-        Predict caries from X-ray image with optional attention and recommendations
-        
-        Args:
-            image_path: Path to X-ray image
-            return_attention: If True, generates attention heatmap
-            return_recommendations: If True, generates clinical recommendations
-        
-        Returns:
-            dict: Comprehensive prediction results including:
-                - has_caries: bool
-                - confidence_score: float
-                - confidence_no_caries: float
-                - confidence_has_caries: float
-                - predicted_class: int
-                - processing_time_ms: float
-                - attention_heatmap: str (base64) if return_attention=True
-                - recommendations: dict if return_recommendations=True
-                - success: bool
+        Predict caries from X-ray image with optional attention and recommendations.
         """
+        if not self._available:
+            return {
+                'success': False,
+                'error': 'Model not loaded. Please check server configuration.'
+            }
+
         start_time = time.time()
-        
+
         try:
-            # Load and preprocess image
             image = Image.open(image_path).convert('RGB')
             img_tensor = self._transform(image).unsqueeze(0).to(self._device)
-            
-            # Prediction
+
             with torch.no_grad():
                 if return_attention:
                     logits, attention = self._model(img_tensor, return_attention=True)
                 else:
                     logits = self._model(img_tensor, return_attention=False)
                     attention = None
-                
+
                 probs = torch.softmax(logits, dim=1)[0]
                 predicted_class = logits.argmax(dim=1).item()
-            
+
             conf_no_caries = probs[0].item()
             conf_has_caries = probs[1].item()
             processing_time = (time.time() - start_time) * 1000
-            
-            # Build result
+
             result = {
                 'has_caries': bool(predicted_class == 1),
                 'confidence_score': max(conf_no_caries, conf_has_caries),
@@ -468,19 +422,17 @@ class CariesDetector:
                 'model_version': 'MAE-ViT-v2.0',
                 'success': True
             }
-            
-            # Generate attention heatmap if requested
+
             if return_attention and attention is not None:
                 heatmap = generate_attention_heatmap(self._model, img_tensor, self._device)
                 result['attention_heatmap'] = heatmap
-            
-            # Generate recommendations if requested
+
             if return_recommendations:
                 recommendations = generate_recommendations(result)
                 result['recommendations'] = recommendations
-            
+
             return result
-            
+
         except Exception as e:
             print(f"Prediction error: {e}")
             return {
