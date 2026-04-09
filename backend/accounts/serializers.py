@@ -63,7 +63,7 @@ Tunzadent Team
             message=message,
             from_email=settings.DEFAULT_FROM_EMAIL,
             recipient_list=[user.email],
-            fail_silently=False,
+            fail_silently=True,
         )
 
 class UserSerializer(serializers.ModelSerializer):
