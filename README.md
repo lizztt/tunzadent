@@ -1,5 +1,8 @@
 # Tunzadent — AI-Powered Dental Caries Detection System
 
+## Website Link 
+https://tunzadent.vercel.app/
+
 ## Overview
 Tunzadent is a web-based clinical support system designed to assist dentists in detecting dental caries (tooth decay) from bitewing radiographs using deep learning.  
 The system integrates a **Masked Autoencoder (MAE)** for self-supervised pre-training and a **Vision Transformer (ViT)** for fine-tuned binary classification of dental images.  
