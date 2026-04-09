@@ -17,7 +17,7 @@ class UserRegistrationSerializer(serializers.ModelSerializer):
         if data['password'] != data['password_confirm']:
             raise serializers.ValidationError("Passwords don't match")
         
-        if User.objects.filter(email=data['email']).exist():
+        if User.objects.filter(email=data['email']).exists():
             raise serializers.ValidationError("Email already registered")
         
         return data
@@ -63,7 +63,7 @@ Tunzadent Team
         '''
         
         old_timeout = socket.getdefaulttimeout()
-        socket.setdefaulttimeout(5)  # 5-second cap on the SMTP connection
+        socket.setdefaulttimeout(5)
         try:
             send_mail(
                 subject=subject,
@@ -74,3 +74,11 @@ Tunzadent Team
             )
         finally:
             socket.setdefaulttimeout(old_timeout)
+
+
+class UserSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = User
+        fields = ['id', 'username', 'email', 'first_name', 'last_name', 
+                  'role', 'email_verified', 'two_fa_enabled', 'two_fa_setup_complete']
+        read_only_fields = ['id', 'email_verified', 'two_fa_enabled', 'two_fa_setup_complete']
