@@ -75,7 +75,7 @@ class CariesClassifier(nn.Module):
     def __init__(self, checkpoint_path, num_classes=2):
         super().__init__()
 
-        checkpoint = torch.load(checkpoint_path, map_location='cpu')
+        checkpoint = torch.load(checkpoint_path, map_location='cpu', weights_only=False)
 
         default_config = {
             'img_size': 224,
